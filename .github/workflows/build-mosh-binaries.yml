@@ -133,6 +133,7 @@ jobs:
       - name: Install Cygwin
         uses: cygwin/cygwin-install-action@v5
         with:
+          add-to-path: false
           # Keep package signature checks, but avoid the setup.exe hash
           # fetch path that currently fails on windows-latest runners.
           check-hash: false
@@ -141,18 +142,25 @@ jobs:
             openssl-devel libssl-devel libprotobuf-devel libncurses-devel
             libncursesw-devel zlib-devel protobuf-compiler
       - name: Build mosh-client.exe (win32-x64)
-        shell: C:\cygwin\bin\bash.exe --login -eo pipefail '{0}'
+        shell: pwsh
         run: |
-          # cygwin-install-action drops us into HOME, but the workflow
-          # checkout lives at $GITHUB_WORKSPACE. Translate to a Cygwin
-          # path before running the build script.
-          WS_WIN="${GITHUB_WORKSPACE//\\//}"
-          cd "$(cygpath -u "$WS_WIN")"
+          $ErrorActionPreference = "Stop"
+          $cygwinBin = "C:\cygwin\bin"
+          $workspace = (& "$cygwinBin\cygpath.exe" -u "$env:GITHUB_WORKSPACE").Trim()
+          $scriptPath = Join-Path $env:RUNNER_TEMP "build-mosh-windows.sh"
+          $script = @'
+          set -euo pipefail
+          cd "__WORKSPACE__"
           export MOSH_REF='${{ env.MOSH_REF }}'
           export ARCH=x64
-          export OUT_DIR="$(cygpath -u "$WS_WIN")/out"
+          export OUT_DIR="__WORKSPACE__/out"
           mkdir -p "$OUT_DIR"
           bash scripts/build-mosh/build-windows.sh
+          '@
+          $script = $script.Replace("__WORKSPACE__", $workspace).Replace("`r`n", "`n")
+          Set-Content -Path $scriptPath -Value $script -NoNewline -Encoding utf8
+          $scriptPathCygwin = (& "$cygwinBin\cygpath.exe" -u "$scriptPath").Trim()
+          & "$cygwinBin\bash.exe" --login "$scriptPathCygwin"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
