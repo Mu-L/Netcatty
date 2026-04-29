@@ -85,9 +85,9 @@ file "$OUT_EXE"
 echo "--- size ---"
 ls -lh "$OUT_EXE"
 
-# Walk the import graph via cygcheck and copy every cygwin-shipped DLL
-# (paths under /usr/bin/) so the binary runs anywhere without an
-# external Cygwin install.
+# Walk the import graph via cygcheck and copy every Cygwin-shipped DLL
+# (paths that normalize to /usr/bin/) so the binary runs anywhere without
+# an external Cygwin install.
 echo "--- cygcheck ---"
 CYGCHECK_OUT="$WORK/cygcheck.txt"
 cygcheck "$OUT_EXE" | tee "$CYGCHECK_OUT"
@@ -95,23 +95,21 @@ bundled_count=0
 while IFS= read -r line; do
   candidate=$(printf '%s' "$line" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
   case "$candidate" in
-    /usr/bin/*.dll|*\\bin\\*.dll|*/bin/*.dll)
+    *.dll|*.DLL)
       # Convert Windows-style paths to Cygwin paths if present.
       cyg_candidate=$(cygpath -u "$candidate" 2>/dev/null || echo "$candidate")
-      if [ -f "$cyg_candidate" ]; then
-        base=$(basename "$cyg_candidate")
-        # Skip OS DLLs that ship with Windows itself.
-        case "$base" in
-          KERNEL32.dll|ntdll.dll|USER32.dll|ADVAPI32.dll|msvcrt.dll|WS2_32.dll|RPCRT4.dll|GDI32.dll)
-            continue
-            ;;
-        esac
-        if [ ! -f "$DLL_DIR/$base" ]; then
-          cp "$cyg_candidate" "$DLL_DIR/$base"
-          echo "bundled DLL: $base"
-          bundled_count=$((bundled_count + 1))
-        fi
-      fi
+      case "$cyg_candidate" in
+        /usr/bin/*.dll|/usr/bin/*.DLL)
+          if [ -f "$cyg_candidate" ]; then
+            base=$(basename "$cyg_candidate")
+            if [ ! -f "$DLL_DIR/$base" ]; then
+              cp "$cyg_candidate" "$DLL_DIR/$base"
+              echo "bundled DLL: $base"
+              bundled_count=$((bundled_count + 1))
+            fi
+          fi
+          ;;
+      esac
       ;;
   esac
 done < "$CYGCHECK_OUT"
