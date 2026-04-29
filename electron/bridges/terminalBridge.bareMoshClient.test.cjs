@@ -46,3 +46,11 @@ test("resolveBareMoshClient ignores a non-executable explicit path", () => {
   const got = resolveBareMoshClient({ moshClientPath: p });
   assert.notEqual(got, p);
 });
+
+test("resolveBareMoshClient honors caller PATH overrides", () => {
+  const tmp = makeTmp();
+  const p = path.join(tmp, "mosh-client");
+  writeExecutable(p);
+
+  assert.equal(resolveBareMoshClient({}, { pathOverride: tmp }), p);
+});

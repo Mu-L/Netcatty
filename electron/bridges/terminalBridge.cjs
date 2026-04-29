@@ -230,12 +230,17 @@ function isWindowsAppExecutionAlias(filePath) {
   return !!windowsAppsDir && normalizedPath.startsWith(`${windowsAppsDir}${path.sep}`);
 }
 
-function findExecutable(name) {
+function findExecutable(name, opts = {}) {
   if (process.platform !== "win32") return name;
   
   const { execFileSync } = require("child_process");
   try {
-    const result = execFileSync("where.exe", [name], { encoding: "utf8" });
+    const pathOverride = Object.prototype.hasOwnProperty.call(opts, "pathOverride")
+      ? opts.pathOverride
+      : process.env.PATH;
+    const env = { ...process.env, PATH: pathOverride || "" };
+    const whereExe = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "where.exe");
+    const result = execFileSync(fs.existsSync(whereExe) ? whereExe : "where.exe", [name], { encoding: "utf8", env });
     const candidates = result
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -250,7 +255,6 @@ function findExecutable(name) {
     console.warn(`Could not find ${name} via where.exe:`, err.message);
   }
   
-  const path = require("node:path");
   if (!/^[a-zA-Z0-9._-]+$/.test(name)) return name;
 
   const commonPaths = [];
@@ -788,7 +792,7 @@ async function startTelnetSession(event, options) {
  *
  * Returns the absolute path or null.
  */
-function resolveBareMoshClient(options) {
+function resolveBareMoshClient(options, opts = {}) {
   const explicit = typeof options.moshClientPath === "string" ? options.moshClientPath.trim() : "";
   if (explicit) {
     const expanded = expandHomePath(explicit);
@@ -805,10 +809,10 @@ function resolveBareMoshClient(options) {
   if (bundled) return bundled;
 
   if (process.platform === "win32") {
-    const onPath = findExecutable("mosh-client");
+    const onPath = findExecutable("mosh-client", { pathOverride: opts.pathOverride });
     if (onPath && onPath !== "mosh-client" && fs.existsSync(onPath)) return onPath;
   } else {
-    const onPath = resolvePosixExecutable("mosh-client");
+    const onPath = resolvePosixExecutable("mosh-client", { pathOverride: opts.pathOverride });
     if (onPath) return onPath;
   }
   return null;
@@ -1075,14 +1079,21 @@ function resolveLangFromCharsetForMosh(charset) {
  * preserved so users with custom mosh setups don't regress.
  */
 async function startMoshSession(event, options) {
+  const optionsEnv = options.env || {};
+  // Program discovery must consider the same PATH the spawned PTY will
+  // receive, including host-level terminal environment overrides.
+  const mergedPathForResolution = Object.prototype.hasOwnProperty.call(optionsEnv, "PATH")
+    ? optionsEnv.PATH
+    : process.env.PATH;
+
   // Phase 2 path — try first.
-  const bareClient = resolveBareMoshClient(options);
+  const bareClient = resolveBareMoshClient(options, { pathOverride: mergedPathForResolution });
   if (bareClient) {
     const sshExe = moshHandshake.resolveSshExecutable({
       findExecutable: (name) => (
         process.platform === "win32"
-          ? findExecutable(name)
-          : resolvePosixExecutable(name)
+          ? findExecutable(name, { pathOverride: mergedPathForResolution })
+          : resolvePosixExecutable(name, { pathOverride: mergedPathForResolution })
       ),
       fileExists: (p) => isExecutableFile(p) || fs.existsSync(p),
     });
@@ -1102,15 +1113,6 @@ async function startMoshSession(event, options) {
   // `/usr/bin:/bin:/usr/sbin:/sbin` and silently fails for Homebrew installs
   // (see issue #842). On Windows keep the existing behaviour.
   //
-  // Resolution must consider the same PATH the spawned process will see —
-  // host-level `environmentVariables.PATH` is merged into the child env
-  // below, so the resolver checks that merged value first to avoid
-  // rejecting a binary the child would actually have found.
-  const optionsEnv = options.env || {};
-  const mergedPathForResolution = Object.prototype.hasOwnProperty.call(optionsEnv, "PATH")
-    ? optionsEnv.PATH
-    : process.env.PATH;
-
   let moshCmd;
   let resolvedMoshDir = null;
   // 1. Honor user-supplied moshClientPath (Settings → Terminal → Mosh).

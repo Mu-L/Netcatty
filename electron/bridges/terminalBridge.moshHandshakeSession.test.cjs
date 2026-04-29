@@ -129,6 +129,56 @@ test("startMoshSession handshake path returns the same shape as the legacy path"
   assert.deepEqual(result, { sessionId: "mosh-test-session" });
 });
 
+test("startMoshSession handshake path honors configured PATH during discovery", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-mosh-session-path-"));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  const binDir = path.join(tmp, "bin");
+  const sshPath = path.join(binDir, "ssh");
+  const moshClientPath = path.join(binDir, "mosh-client");
+  writeExecutable(sshPath);
+  writeExecutable(moshClientPath);
+
+  const oldPath = process.env.PATH;
+  process.env.PATH = "";
+  t.after(() => { process.env.PATH = oldPath; });
+
+  const spawns = [];
+  const bridge = loadBridgeWithFakePty(spawns);
+  const sessions = new Map();
+  const sent = [];
+  bridge.init({
+    sessions,
+    electronModule: {
+      webContents: {
+        fromId() {
+          return { send: (channel, payload) => sent.push({ channel, payload }) };
+        },
+      },
+    },
+  });
+
+  const result = await bridge.startMoshSession(
+    { sender: { id: 42 } },
+    {
+      sessionId: "mosh-path-session",
+      hostname: "example.com",
+      username: "alice",
+      cols: 80,
+      rows: 24,
+      env: { PATH: binDir },
+    },
+  );
+
+  assert.deepEqual(result, { sessionId: "mosh-path-session" });
+  assert.equal(spawns[0].command, sshPath);
+
+  spawns[0].emitData("MOSH CONNECT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n");
+  spawns[0].emitExit({ exitCode: 0, signal: 0 });
+
+  assert.equal(spawns[1].command, moshClientPath);
+});
+
 test("startMoshSession handshake path sends the existing exit event on failure", async (t) => {
   const h = makeHarness(t);
   await h.bridge.startMoshSession(h.event, h.options);
