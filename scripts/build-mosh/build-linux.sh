@@ -57,6 +57,7 @@ curl -fsSL "https://invisible-island.net/archives/ncurses/ncurses-$NCURSES_VER.t
 # Mosh
 git clone --depth 1 --branch "$MOSH_REF" https://github.com/mobile-shell/mosh.git
 ( cd mosh
+  export PATH="$PREFIX/bin:$PATH"
   ./autogen.sh
   PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig" \
   ./configure --enable-completion=no --disable-server \

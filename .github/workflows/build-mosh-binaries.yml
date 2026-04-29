@@ -140,7 +140,7 @@ jobs:
           # fetch path that currently fails on windows-latest runners.
           check-hash: false
           packages: >
-            gcc-g++ make autoconf automake libtool perl pkg-config git
+            gcc-g++ make autoconf automake libtool perl perl_pods pkg-config git
             openssl-devel libssl-devel libprotobuf-devel libncurses-devel
             libncursesw-devel zlib-devel protobuf-compiler
       - name: Build mosh-client.exe (win32-x64)
