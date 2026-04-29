@@ -34,6 +34,7 @@ brew list libtool >/dev/null 2>&1 || brew install libtool
 
 WORK=$(mktemp -d)
 mkdir -p "$OUT_DIR"
+NATIVE_PROTOC_DIR=""
 
 # Pre-fetch sources once.
 cd "$WORK"
@@ -81,12 +82,15 @@ build_arch() {
     # protoc compiled in the first pass via PATH.
     make -j"$(sysctl -n hw.ncpu)" || make -j1
     make install )
+  if [ "$ARCH" = "$NATIVE_ARCH" ]; then
+    NATIVE_PROTOC_DIR="$PREFIX/bin"
+  fi
 
   # ncurses
   rm -rf "ncurses-$NCURSES_VER"
   tar xf ncurses.tgz
   ( cd "ncurses-$NCURSES_VER"
-    ./configure --prefix="$PREFIX" --without-shared --without-debug --without-cxx-shared --without-tests --disable-pc-files --with-termlib --enable-widec --host="$TRIPLE" \
+    ./configure --prefix="$PREFIX" --without-shared --without-debug --without-cxx-shared --without-tests --disable-pc-files --enable-widec --host="$TRIPLE" \
       CC="clang" CXX="clang++" \
       CFLAGS="$CFLAGS_COMMON" CXXFLAGS="$CFLAGS_COMMON" LDFLAGS="$LDFLAGS_COMMON"
     make -j"$(sysctl -n hw.ncpu)"
@@ -95,10 +99,12 @@ build_arch() {
   # mosh per-arch build
   ( cd mosh-src
     make distclean >/dev/null 2>&1 || true
+    export PATH="${NATIVE_PROTOC_DIR:-$PREFIX/bin}:$PATH"
     ./autogen.sh
     PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig" \
     ./configure --enable-completion=no --disable-server --host="$TRIPLE" \
       CXX="clang++" CC="clang" \
+      CPPFLAGS="-I$PREFIX/include -I$PREFIX/include/ncursesw" \
       CXXFLAGS="-I$PREFIX/include -I$PREFIX/include/ncursesw $CFLAGS_COMMON" \
       CFLAGS="-I$PREFIX/include -I$PREFIX/include/ncursesw $CFLAGS_COMMON" \
       LDFLAGS="-L$PREFIX/lib $LDFLAGS_COMMON"
