@@ -28,10 +28,12 @@ on:
     tags:
       - "mosh-bin-*"
     paths:
+      - ".gitattributes"
       - ".github/workflows/build-mosh-binaries.yml"
       - "scripts/build-mosh/**"
   pull_request:
     paths:
+      - ".gitattributes"
       - ".github/workflows/build-mosh-binaries.yml"
       - "scripts/build-mosh/**"
 
