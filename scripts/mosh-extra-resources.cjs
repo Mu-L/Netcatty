@@ -25,19 +25,22 @@ function moshExtraResources(platform) {
     ];
   }
 
-  if (platform === "linux" || platform === "win32") {
-    // electron-builder substitutes ${arch} per build target. We don't
-    // know which arch the upcoming build will run for here, so include
-    // the directive whenever *any* matching arch is on disk and let
-    // electron-builder expand `${arch}` at build time. If the arch
-    // directory is missing for the target the build will fail loudly —
-    // by design, shipping an installer without its mosh binary is
-    // worse than a clear error.
-    const prefix = platform === "win32" ? "win32-" : "linux-";
-    const filter = platform === "win32" ? ["mosh-client.exe"] : ["mosh-client"];
-    const anyArchDir = fs.readdirSync(moshRoot).some((d) => d.startsWith(prefix));
+  if (platform === "linux") {
+    const anyArchDir = fs.readdirSync(moshRoot).some((d) => d.startsWith("linux-"));
     if (!anyArchDir) return [];
-    return [{ from: `resources/mosh/${prefix}\${arch}/`, to: "mosh/", filter }];
+    return [{ from: "resources/mosh/linux-${arch}/", to: "mosh/", filter: ["mosh-client"] }];
+  }
+
+  if (platform === "win32") {
+    // Windows ships mosh-client.exe + Cygwin DLL bundle (cygwin1.dll,
+    // cygcrypto-*.dll, etc.) — copy the entire arch directory so the
+    // exe finds its DLLs at runtime via Windows' default search order.
+    const anyArchDir = fs.readdirSync(moshRoot).some((d) => d.startsWith("win32-"));
+    if (!anyArchDir) return [];
+    return [
+      { from: "resources/mosh/win32-${arch}/", to: "mosh/", filter: ["mosh-client.exe"] },
+      { from: "resources/mosh/win32-${arch}/mosh-client-win32-${arch}-dlls/", to: "mosh/", filter: ["**/*"] },
+    ];
   }
 
   return [];

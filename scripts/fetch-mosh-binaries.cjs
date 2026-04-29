@@ -37,11 +37,16 @@ const RES_DIR = path.join(ROOT, "resources", "mosh");
 // (file basename in the release ⟶ relative subpath under resources/mosh/)
 // Using flat names in the release for SHA256SUMS readability, then
 // fanning out into platform-arch subdirs locally.
+//
+// `extract` indicates a tar.gz archive containing the binary + helper
+// DLLs (Windows). The tarball is unpacked into the platform-arch
+// directory so resources/mosh/win32-x64/ ends up with mosh-client.exe
+// alongside cygwin1.dll, cygcrypto-*.dll, etc.
 const TARGETS = [
   { platform: "linux",  arch: "x64",        file: "mosh-client-linux-x64",          local: "linux-x64/mosh-client" },
   { platform: "linux",  arch: "arm64",      file: "mosh-client-linux-arm64",        local: "linux-arm64/mosh-client" },
   { platform: "darwin", arch: "universal",  file: "mosh-client-darwin-universal",   local: "darwin-universal/mosh-client" },
-  { platform: "win32",  arch: "x64",        file: "mosh-client-win32-x64.exe",      local: "win32-x64/mosh-client.exe" },
+  { platform: "win32",  arch: "x64",        file: "mosh-client-win32-x64.tar.gz",   localDir: "win32-x64", extract: "tar.gz" },
 ];
 
 const release = process.env.MOSH_BIN_RELEASE;
@@ -112,9 +117,6 @@ async function fetchSums() {
 
 async function fetchOne(target, sums) {
   const url = `${baseUrl}/${target.file}`;
-  const dest = path.join(RES_DIR, target.local);
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-
   let buf;
   try {
     buf = await follow(url);
@@ -133,6 +135,33 @@ async function fetchOne(target, sums) {
     warn(`no SHA256 entry for ${target.file} — accepting actual ${actual}`);
   }
 
+  if (target.extract === "tar.gz") {
+    const destDir = path.join(RES_DIR, target.localDir);
+    fs.mkdirSync(destDir, { recursive: true });
+    // Use the system `tar` to unpack — it ships on macOS, Linux, and
+    // Windows 10 1803+. Avoids pulling in a Node tar dependency just
+    // for the prebuild step.
+    const { execFileSync } = require("node:child_process");
+    const tmp = path.join(destDir, ".__mosh_bundle.tar.gz");
+    fs.writeFileSync(tmp, buf);
+    try {
+      execFileSync("tar", ["-xzf", tmp, "-C", destDir], { stdio: "inherit" });
+    } finally {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    }
+    // Mark unpacked .exe / DLLs executable on POSIX (no-op on Win).
+    if (process.platform !== "win32") {
+      const exe = path.join(destDir, "mosh-client.exe");
+      if (fs.existsSync(exe)) {
+        try { fs.chmodSync(exe, 0o755); } catch { /* ignore */ }
+      }
+    }
+    log(`unpacked ${target.file} into ${path.relative(ROOT, destDir)}/ (sha256=${actual})`);
+    return true;
+  }
+
+  const dest = path.join(RES_DIR, target.local);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, buf);
   if (target.platform !== "win32") {
     fs.chmodSync(dest, 0o755);

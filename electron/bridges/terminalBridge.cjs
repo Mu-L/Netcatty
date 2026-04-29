@@ -814,78 +814,25 @@ function resolveBareMoshClient(options) {
 }
 
 /**
- * Run the SSH bootstrap that the Perl `mosh` wrapper would otherwise
- * do: spawn `ssh [user@]host -- mosh-server new`, capture stdout, and
- * resolve with the port + key parsed from the MOSH CONNECT line.
+ * Phase-2 / Phase-3b path: run the SSH bootstrap ourselves *inside the
+ * user's terminal PTY* so password / 2FA / known-hosts prompts render
+ * naturally, then swap to a bare `mosh-client` once `MOSH CONNECT` is
+ * detected. Replaces both the upstream Mosh Perl wrapper and the
+ * earlier non-PTY (BatchMode-style) implementation that couldn't show
+ * prompts.
  *
- * Stdout / stderr are buffered (not streamed to the terminal) — the
- * SSH bootstrap is internal protocol; only its exit / parse outcome
- * matters to the user. On parse, ssh exits naturally because the
- * remote `mosh-server new` forks and detaches. On auth failure ssh
- * exits non-zero and we surface its stderr in the rejection so the
- * renderer can print a useful message.
- */
-function runMoshSshHandshake({ sshExe, host, port, username, lang, moshServer, sshArgs, timeoutMs }) {
-  return new Promise((resolve, reject) => {
-    const { spawn } = require("node:child_process");
-    const { args } = moshHandshake.buildSshHandshakeCommand({ host, port, username, lang, moshServer, sshArgs });
-    const stdoutBuf = [];
-    const stderrBuf = [];
-
-    let settled = false;
-    const settle = (fn) => { if (settled) return; settled = true; fn(); };
-    const child = spawn(sshExe, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      // Inherit env so SSH can resolve the user's ssh-agent socket,
-      // SSH config (~/.ssh/config), and known_hosts.
-      env: process.env,
-    });
-
-    const timer = setTimeout(() => {
-      try { child.kill("SIGTERM"); } catch { /* ignore */ }
-      settle(() => reject(new Error(
-        `SSH bootstrap for Mosh timed out after ${timeoutMs}ms. ` +
-        "Ensure `ssh ${user}@${host}` works non-interactively (key auth or agent).",
-      )));
-    }, timeoutMs || 30_000);
-
-    child.stdout.on("data", (chunk) => {
-      stdoutBuf.push(chunk);
-      const parsed = moshHandshake.parseMoshConnect(Buffer.concat(stdoutBuf));
-      if (parsed) {
-        clearTimeout(timer);
-        // Don't kill ssh — it'll exit cleanly after mosh-server forks.
-        settle(() => resolve({ port: parsed.port, key: parsed.key }));
-      }
-    });
-    child.stderr.on("data", (chunk) => stderrBuf.push(chunk));
-
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      settle(() => reject(new Error(`Failed to spawn ssh: ${err.message}`)));
-    });
-
-    child.on("exit", (code, signal) => {
-      clearTimeout(timer);
-      // If we already resolved in the stdout handler, this is the
-      // benign post-fork exit and we don't need to do anything.
-      if (settled) return;
-      const stderr = Buffer.concat(stderrBuf).toString("utf8").trim();
-      const stdout = Buffer.concat(stdoutBuf).toString("utf8").trim();
-      const reason = signal ? `signal ${signal}` : `code ${code}`;
-      const detail = stderr || stdout || "(no output)";
-      settle(() => reject(new Error(
-        `SSH bootstrap for Mosh failed (${reason}). Output:\n${detail}`,
-      )));
-    });
-  });
-}
-
-/**
- * Phase 2 path: run the SSH handshake ourselves and spawn a bare
- * `mosh-client` directly, instead of delegating to the upstream Perl
- * `mosh` wrapper. Lets Mosh work on Windows out of the box and lets
- * macOS / Linux users use a bundled, statically-linked client.
+ * State machine:
+ *   ssh-spawn ──onData──▶ sniffer.feed ──visible──▶ renderer
+ *                                  └──parsed──▶ remember port/key
+ *   ssh-pty exits  ─────▶ if parsed: spawn mosh-client + swap
+ *                          else: surface error
+ *
+ * The session keeps a stable sessionId across the swap. session.proc
+ * is updated atomically before any user input arrives at the new
+ * mosh-client (writeToSession / resizeSession route through
+ * session.proc, so they automatically address the right process). The
+ * ZMODEM sentry is recreated for the new proc because its
+ * writeToRemote closure captures the previous handle.
  *
  * Caller has already validated that `bareClient` and `sshExe` exist.
  */
@@ -894,48 +841,32 @@ async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe
   const cols = options.cols || 80;
   const rows = options.rows || 24;
   const optionsEnv = options.env || {};
-  const lang = (optionsEnv.LANG || resolveLangFromCharsetForMosh(options.charset));
+  const lang = optionsEnv.LANG || resolveLangFromCharsetForMosh(options.charset);
 
-  // Run ssh + mosh-server. Errors here propagate to the renderer with
-  // the captured ssh stderr so the user can see "Permission denied",
-  // "Host key verification failed", etc.
-  const { port, key } = await runMoshSshHandshake({
-    sshExe,
+  const { args: sshArgs } = moshHandshake.buildSshHandshakeCommand({
     host: options.hostname,
     port: options.port,
     username: options.username,
     lang,
     moshServer: options.moshServerPath ? `${options.moshServerPath} new -s` : undefined,
-    sshArgs: undefined,
-    timeoutMs: 30_000,
   });
 
-  const env = moshHandshake.buildMoshClientEnv({
-    baseEnv: { ...process.env, ...optionsEnv, TERM: "xterm-256color" },
-    key,
-    lang,
-  });
+  const sshEnv = { ...process.env, ...optionsEnv, TERM: "xterm-256color" };
   if (options.agentForwarding && process.env.SSH_AUTH_SOCK) {
-    env.SSH_AUTH_SOCK = process.env.SSH_AUTH_SOCK;
+    sshEnv.SSH_AUTH_SOCK = process.env.SSH_AUTH_SOCK;
   }
 
-  const { command, args: clientArgs } = moshHandshake.buildMoshClientCommand({
-    moshClientPath: bareClient,
-    host: options.hostname,
-    port,
-  });
-
-  const proc = pty.spawn(command, clientArgs, {
+  const sshPty = pty.spawn(sshExe, sshArgs, {
     cols,
     rows,
-    env,
+    env: sshEnv,
     cwd: os.homedir(),
     encoding: null,
   });
 
   const session = {
-    proc,
-    pty: proc,
+    proc: sshPty,
+    pty: sshPty,
     type: "mosh",
     protocol: "mosh",
     webContentsId: event.sender.id,
@@ -948,6 +879,10 @@ async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe
     lastIdlePrompt: "",
     lastIdlePromptAt: 0,
     _promptTrackTail: "",
+    cols,
+    rows,
+    moshHandshakePhase: "ssh",
+    moshHandshakeResult: null,
   };
   sessions.set(sessionId, session);
 
@@ -967,6 +902,111 @@ async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe
   });
   session.flushPendingData = flush;
 
+  const sniffer = moshHandshake.createMoshConnectSniffer();
+
+  // Forward bytes from the ssh PTY to the renderer, redacting the
+  // MOSH CONNECT magic line. ZMODEM is intentionally not enabled
+  // during handshake — it can't appear during ssh login output and
+  // would only complicate the swap.
+  sshPty.onData((chunk) => {
+    const { visible, parsed } = sniffer.feed(chunk);
+    if (visible && (visible.length || (typeof visible === "string" && visible))) {
+      const str = Buffer.isBuffer(visible) ? visible.toString("utf8") : visible;
+      if (str.length > 0) {
+        bufferData(str);
+        sessionLogStreamManager.appendData(sessionId, str);
+      }
+    }
+    if (parsed && session.moshHandshakePhase === "ssh") {
+      session.moshHandshakePhase = "parsed";
+      session.moshHandshakeResult = parsed;
+    }
+  });
+
+  sshPty.onExit(({ exitCode, signal }) => {
+    if (session.moshHandshakePhase === "parsed" && session.moshHandshakeResult) {
+      try {
+        swapToMoshClient(session, options, {
+          bareClient,
+          optionsEnv,
+          lang,
+          parsed: session.moshHandshakeResult,
+          bufferData,
+          flush,
+          sessionId,
+        });
+      } catch (err) {
+        flush();
+        sessionLogStreamManager.stopStream(sessionId);
+        const contents = electronModule.webContents.fromId(session.webContentsId);
+        contents?.send("netcatty:session-exit", {
+          sessionId,
+          reason: "error",
+          error: `Failed to spawn mosh-client: ${err.message}`,
+        });
+        sessions.delete(sessionId);
+      }
+      return;
+    }
+
+    // Handshake failed before MOSH CONNECT — ssh exited without parse.
+    // The user has already seen the failure output (auth error, host
+    // key warning, etc). Just surface a session-exit with the code so
+    // the renderer can label the session "disconnected".
+    flush();
+    sessionLogStreamManager.stopStream(sessionId);
+    const contents = electronModule.webContents.fromId(session.webContentsId);
+    contents?.send("netcatty:session-exit", {
+      sessionId,
+      exitCode,
+      signal,
+      reason: "error",
+    });
+    sessions.delete(sessionId);
+  });
+
+  return sessionId;
+}
+
+/**
+ * Mid-session PTY swap: replaces session.proc (currently the ssh
+ * handshake PTY) with a freshly-spawned mosh-client PTY, re-wiring
+ * the data / exit listeners and (on POSIX) recreating the ZMODEM
+ * sentry whose writeToRemote closure captured the previous handle.
+ */
+function swapToMoshClient(session, options, ctx) {
+  const { bareClient, optionsEnv, lang, parsed, bufferData, flush, sessionId } = ctx;
+
+  const env = moshHandshake.buildMoshClientEnv({
+    baseEnv: { ...process.env, ...optionsEnv, TERM: "xterm-256color" },
+    key: parsed.key,
+    lang,
+  });
+  if (options.agentForwarding && process.env.SSH_AUTH_SOCK) {
+    env.SSH_AUTH_SOCK = process.env.SSH_AUTH_SOCK;
+  }
+
+  const { command, args: clientArgs } = moshHandshake.buildMoshClientCommand({
+    moshClientPath: bareClient,
+    host: options.hostname,
+    port: parsed.port,
+  });
+
+  const mcPty = pty.spawn(command, clientArgs, {
+    cols: session.cols,
+    rows: session.rows,
+    env,
+    cwd: os.homedir(),
+    encoding: null,
+  });
+
+  // Atomic swap — writeToSession / resizeSession both read
+  // session.proc lazily, so any keystroke that arrives after this
+  // assignment goes to mosh-client, not the dead ssh PTY.
+  session.proc = mcPty;
+  session.pty = mcPty;
+  session.moshHandshakePhase = "mosh-client";
+
   if (process.platform !== "win32") {
     const decoder = new StringDecoder("utf8");
     const sentry = createZmodemSentry({
@@ -979,17 +1019,15 @@ async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe
         sessionLogStreamManager.appendData(sessionId, str);
       },
       writeToRemote(buf) {
-        try { return proc.write(buf); } catch { return true; }
+        try { return mcPty.write(buf); } catch { return true; }
       },
-      getWebContents() {
-        return electronModule.webContents.fromId(session.webContentsId);
-      },
+      getWebContents() { return electronModule.webContents.fromId(session.webContentsId); },
       protocolLabel: "Mosh",
     });
     session.zmodemSentry = sentry;
-    proc.onData((data) => sentry.consume(data));
+    mcPty.onData((data) => sentry.consume(data));
   } else {
-    proc.onData((data) => {
+    mcPty.onData((data) => {
       const str = data.toString("utf8");
       trackSessionIdlePrompt(session, str);
       bufferData(str);
@@ -997,19 +1035,18 @@ async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe
     });
   }
 
-  proc.onExit(({ exitCode, signal }) => {
+  mcPty.onExit(({ exitCode, signal }) => {
     flush();
     sessionLogStreamManager.stopStream(sessionId);
     const contents = electronModule.webContents.fromId(session.webContentsId);
-    if (exitCode !== 0) {
-      contents?.send("netcatty:session-exit", { sessionId, exitCode, signal, reason: "error" });
-    } else {
-      contents?.send("netcatty:session-exit", { sessionId, exitCode, signal, reason: "exited" });
-    }
+    contents?.send("netcatty:session-exit", {
+      sessionId,
+      exitCode,
+      signal,
+      reason: exitCode !== 0 ? "error" : "exited",
+    });
     sessions.delete(sessionId);
   });
-
-  return sessionId;
 }
 
 function resolveLangFromCharsetForMosh(charset) {
