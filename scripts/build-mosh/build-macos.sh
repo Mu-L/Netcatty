@@ -20,6 +20,18 @@ set -euo pipefail
 : "${MOSH_REF:?missing MOSH_REF}"
 : "${OUT_DIR:?missing OUT_DIR}"
 
+validate_mosh_ref() {
+  if [[ ! "$MOSH_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] \
+    || [[ "$MOSH_REF" == *..* ]] \
+    || [[ "$MOSH_REF" == *@\{* ]] \
+    || [[ "$MOSH_REF" == */ ]] \
+    || [[ "$MOSH_REF" == *.lock ]]; then
+    echo "ERROR: invalid MOSH_REF: $MOSH_REF" >&2
+    exit 1
+  fi
+}
+validate_mosh_ref
+
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 
 OPENSSL_VER=3.0.13
@@ -33,6 +45,7 @@ brew list pkg-config >/dev/null 2>&1 || brew install pkg-config
 brew list libtool >/dev/null 2>&1 || brew install libtool
 
 WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$OUT_DIR"
 NATIVE_PROTOC_DIR=""
 
@@ -41,7 +54,10 @@ cd "$WORK"
 curl -fsSL "https://www.openssl.org/source/openssl-$OPENSSL_VER.tar.gz" -o openssl.tgz
 curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v$PROTOBUF_VER/protobuf-cpp-3.$PROTOBUF_VER.tar.gz" -o protobuf.tgz
 curl -fsSL "https://invisible-island.net/archives/ncurses/ncurses-$NCURSES_VER.tar.gz" -o ncurses.tgz
-git clone --depth 1 --branch "$MOSH_REF" https://github.com/mobile-shell/mosh.git mosh-src
+git init mosh-src
+git -C mosh-src remote add origin https://github.com/mobile-shell/mosh.git
+git -C mosh-src fetch --depth 1 origin "$MOSH_REF"
+git -C mosh-src checkout --detach FETCH_HEAD
 
 build_arch() {
   local ARCH="$1"

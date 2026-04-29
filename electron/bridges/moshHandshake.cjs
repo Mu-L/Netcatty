@@ -28,11 +28,100 @@
  */
 
 const path = require("node:path");
+const net = require("node:net");
 
-// MOSH CONNECT line format: "MOSH CONNECT <port> <base64-key>" followed by
-// a CR or LF. We accept either separator and trim trailing junk because
-// motds and shell prompts may share the same line buffer.
-const MOSH_CONNECT_RE = /MOSH CONNECT (\d{1,5}) ([A-Za-z0-9+/]+={0,2})/;
+const MOSH_CONNECT_RE = /MOSH CONNECT[ \t]+(\d{1,5})[ \t]+([A-Za-z0-9+/]+={0,2})[ \t]*$/;
+const MOSH_IP_RE = /MOSH IP[ \t]+(\S+)[ \t]*/;
+const PROTOCOL_MARKERS = ["MOSH CONNECT", "MOSH IP"];
+
+function shellQuote(value) {
+  const text = String(value);
+  return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+function validMoshKey(key) {
+  return key.length === 22 || (key.length === 24 && key.endsWith("=="));
+}
+
+function parseConnectLine(line) {
+  const m = MOSH_CONNECT_RE.exec(line);
+  if (!m) return null;
+  const port = Number(m[1]);
+  const key = m[2];
+  if (!Number.isFinite(port) || port <= 0 || port > 65535) return null;
+  if (!validMoshKey(key)) return null;
+  return {
+    port,
+    key,
+    matchStartOffset: m.index,
+    matchEndOffset: m.index + m[0].length,
+  };
+}
+
+function parseMoshIpLine(line) {
+  const m = MOSH_IP_RE.exec(line);
+  if (!m) return null;
+  const host = m[1];
+  return net.isIP(host) ? host : null;
+}
+
+function forEachCompleteLine(text, visit) {
+  const lineRe = /([^\r\n]*)(\r\n|\r|\n)/g;
+  let m;
+  while ((m = lineRe.exec(text)) !== null) {
+    if (visit({
+      line: m[1],
+      newline: m[2],
+      startIndex: m.index,
+      endIndex: lineRe.lastIndex,
+    }) === false) {
+      break;
+    }
+  }
+}
+
+function findMoshConnect(text) {
+  let found = null;
+  forEachCompleteLine(text, ({ line, newline, startIndex, endIndex }) => {
+    const parsed = parseConnectLine(line);
+    if (!parsed) return;
+    found = {
+      port: parsed.port,
+      key: parsed.key,
+      matchStartIndex: startIndex + parsed.matchStartOffset,
+      matchEndIndex: endIndex,
+      visiblePrefix: line.slice(0, parsed.matchStartOffset),
+      visibleSuffix: line.slice(parsed.matchEndOffset) + newline,
+    };
+    return false;
+  });
+  return found;
+}
+
+function potentialProtocolStart(text) {
+  if (!text) return -1;
+  let best = -1;
+  for (const marker of PROTOCOL_MARKERS) {
+    const full = text.indexOf(marker);
+    if (full !== -1) {
+      best = best === -1 ? full : Math.min(best, full);
+    }
+    for (let len = Math.min(marker.length - 1, text.length); len > 0; len -= 1) {
+      if (marker.startsWith(text.slice(text.length - len))) {
+        const pos = text.length - len;
+        best = best === -1 ? pos : Math.min(best, pos);
+        break;
+      }
+    }
+  }
+  return best;
+}
+
+function buildMoshServerCommand(moshServerPath) {
+  const trimmed = typeof moshServerPath === "string" ? moshServerPath.trim() : "";
+  if (!trimmed) return "mosh-server new -s";
+  return `${shellQuote(trimmed)} new -s`;
+}
 
 /**
  * Parse a buffer of bytes from the SSH PTY for a MOSH CONNECT line.
@@ -49,16 +138,9 @@ const MOSH_CONNECT_RE = /MOSH CONNECT (\d{1,5}) ([A-Za-z0-9+/]+={0,2})/;
  */
 function parseMoshConnect(buffer) {
   const text = Buffer.isBuffer(buffer) ? buffer.toString("utf8") : String(buffer);
-  const m = MOSH_CONNECT_RE.exec(text);
-  if (!m) return null;
-  const port = Number(m[1]);
-  const key = m[2];
-  if (!Number.isFinite(port) || port <= 0 || port > 65535) return null;
-  // Decoded MOSH key is 16 bytes → base64 length 22 (no padding) or 24
-  // (padded). Anything else is almost certainly a substring match in
-  // unrelated remote output.
-  if (key.length < 22 || key.length > 24) return null;
-  return { port, key, matchEndIndex: m.index + m[0].length };
+  const found = findMoshConnect(text);
+  if (!found) return null;
+  return { port: found.port, key: found.key, matchEndIndex: found.matchEndIndex };
 }
 
 /**
@@ -103,7 +185,7 @@ function buildSshHandshakeCommand(opts) {
   // and otherwise stays silent.
   const lang = opts.lang || "en_US.UTF-8";
   const moshServer = opts.moshServer || "mosh-server new -s";
-  args.push(`LC_ALL=${lang} ${moshServer}`);
+  args.push(`LC_ALL=${shellQuote(lang)} ${moshServer}`);
   return { command: "ssh", args };
 }
 
@@ -146,8 +228,10 @@ function buildMoshClientCommand({ moshClientPath, host, port }) {
  */
 function createMoshConnectSniffer() {
   const RING_SIZE = 4096;
+  const MAX_PROTOCOL_LINE = 512;
   let pending = "";
   let parsed = null;
+  let moshHost = null;
 
   return {
     feed(chunk) {
@@ -155,32 +239,63 @@ function createMoshConnectSniffer() {
 
       const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
       pending += text;
+      let visibleText = "";
+      let consumed = 0;
 
-      const m = MOSH_CONNECT_RE.exec(pending);
-      if (!m) {
-        // Trim the ring buffer to RING_SIZE.
-        if (pending.length > RING_SIZE) {
-          pending = pending.slice(pending.length - RING_SIZE);
+      forEachCompleteLine(pending, ({ line, newline, startIndex, endIndex }) => {
+        if (startIndex > consumed) {
+          visibleText += pending.slice(consumed, startIndex);
         }
-        return { visible: chunk, parsed: null };
+
+        const ip = parseMoshIpLine(line);
+        if (ip) {
+          moshHost = ip;
+          consumed = endIndex;
+          return;
+        }
+
+        const connect = parseConnectLine(line);
+        if (connect) {
+          parsed = { port: connect.port, key: connect.key };
+          if (moshHost) parsed.host = moshHost;
+          visibleText += line.slice(0, connect.matchStartOffset);
+          const suffix = line.slice(connect.matchEndOffset);
+          if (suffix) visibleText += suffix + newline;
+          consumed = endIndex;
+          return false;
+        }
+
+        visibleText += line + newline;
+        consumed = endIndex;
+      });
+
+      if (parsed) {
+        visibleText += pending.slice(consumed);
+        pending = "";
+        const visible = Buffer.isBuffer(chunk) ? Buffer.from(visibleText, "utf8") : visibleText;
+        return { visible, parsed };
       }
 
-      // Found the marker. Only suppress the bytes from this chunk that
-      // overlap the matched line — earlier chunks already shipped to
-      // the renderer; the user has likely seen the start of the line
-      // already, but mosh-server typically prints CONNECT after the
-      // shell-startup lines so the leakage is cosmetic.
-      const port = Number(m[1]);
-      const key = m[2];
-      parsed = { port, key };
+      pending = pending.slice(consumed);
+      const holdIndex = potentialProtocolStart(pending);
+      if (holdIndex === -1) {
+        visibleText += pending;
+        pending = "";
+      } else {
+        visibleText += pending.slice(0, holdIndex);
+        pending = pending.slice(holdIndex);
+        if (pending.length > MAX_PROTOCOL_LINE) {
+          visibleText += pending;
+          pending = "";
+        }
+      }
 
-      // For the visible passthrough of the *current* chunk: strip the
-      // MOSH CONNECT line itself (if it appears in this chunk) so the
-      // user doesn't see internal protocol noise.
-      const visibleText = text.replace(MOSH_CONNECT_RE, "").replace(/\r?\n\r?\n/g, "\n");
+      if (pending.length > RING_SIZE) {
+        const overflow = pending.length - RING_SIZE;
+        visibleText += pending.slice(0, overflow);
+        pending = pending.slice(overflow);
+      }
       const visible = Buffer.isBuffer(chunk) ? Buffer.from(visibleText, "utf8") : visibleText;
-
-      pending = "";
       return { visible, parsed };
     },
     isParsed() { return parsed !== null; },
@@ -221,6 +336,7 @@ function resolveSshExecutable({ findExecutable, fileExists, platform = process.p
 module.exports = {
   parseMoshConnect,
   buildSshHandshakeCommand,
+  buildMoshServerCommand,
   buildMoshClientCommand,
   createMoshConnectSniffer,
   buildMoshClientEnv,

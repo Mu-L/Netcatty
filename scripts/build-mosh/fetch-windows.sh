@@ -20,7 +20,7 @@ set -euo pipefail
 # Pin: github.com/felixse/FluentTerminal commit bad0f85,
 # Dependencies/MoshExecutables/x64/mosh-client.exe.
 SOURCE_URL="https://raw.githubusercontent.com/felixse/FluentTerminal/bad0f85/Dependencies/MoshExecutables/x64/mosh-client.exe"
-EXPECTED_SHA256="" # Filled on first successful run; CI fails fast if mismatched.
+EXPECTED_SHA256="5a8d84ff205c6a0711e53b961f909484a892f42648807e52d46d4fa93c05e286"
 
 mkdir -p "$OUT_DIR"
 OUT="$OUT_DIR/mosh-client-win32-x64.exe"
@@ -28,14 +28,14 @@ OUT="$OUT_DIR/mosh-client-win32-x64.exe"
 curl -fsSL "$SOURCE_URL" -o "$OUT"
 ACTUAL=$(sha256sum "$OUT" | awk '{print $1}')
 
-if [ -n "$EXPECTED_SHA256" ] && [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
   echo "ERROR: SHA256 mismatch for mosh-client.exe" >&2
   echo "  expected: $EXPECTED_SHA256" >&2
   echo "  actual:   $ACTUAL"   >&2
   exit 1
 fi
 
-echo "Fetched mosh-client.exe (sha256=$ACTUAL) — pin EXPECTED_SHA256 in fetch-windows.sh after first verified run."
+echo "Fetched mosh-client.exe (sha256=$ACTUAL)."
 ls -lh "$OUT"
 echo "$ACTUAL  mosh-client-win32-x64.exe" > "$OUT.sha256"
 cat "$OUT.sha256"

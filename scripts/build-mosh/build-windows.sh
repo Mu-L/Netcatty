@@ -29,6 +29,18 @@ set -euo pipefail
 : "${ARCH:?missing ARCH}"
 : "${OUT_DIR:?missing OUT_DIR}"
 
+validate_mosh_ref() {
+  if [[ ! "$MOSH_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] \
+    || [[ "$MOSH_REF" == *..* ]] \
+    || [[ "$MOSH_REF" == *@\{* ]] \
+    || [[ "$MOSH_REF" == */ ]] \
+    || [[ "$MOSH_REF" == *.lock ]]; then
+    echo "ERROR: invalid MOSH_REF: $MOSH_REF" >&2
+    exit 1
+  fi
+}
+validate_mosh_ref
+
 if [ "$ARCH" != "x64" ]; then
   echo "ERROR: only ARCH=x64 supported by the Cygwin Windows build (got: $ARCH)." >&2
   exit 1
@@ -43,6 +55,7 @@ if ! uname -a | grep -qi CYGWIN; then
 fi
 
 WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$OUT_DIR"
 
 cd "$WORK"
@@ -50,7 +63,10 @@ cd "$WORK"
 # Build mosh against the Cygwin-supplied OpenSSL, protobuf, ncurses.
 # Static linking against those is not supported by the upstream
 # build for Cygwin, so we accept the dynamic deps and bundle the DLLs.
-git clone --depth 1 --branch "$MOSH_REF" https://github.com/mobile-shell/mosh.git
+git init mosh
+git -C mosh remote add origin https://github.com/mobile-shell/mosh.git
+git -C mosh fetch --depth 1 origin "$MOSH_REF"
+git -C mosh checkout --detach FETCH_HEAD
 cd mosh
 ./autogen.sh
 ./configure --enable-completion=no --disable-server \
@@ -73,7 +89,8 @@ ls -lh "$OUT_EXE"
 # (paths under /usr/bin/) so the binary runs anywhere without an
 # external Cygwin install.
 echo "--- cygcheck ---"
-cygcheck "$OUT_EXE" | tee /tmp/cygcheck.txt
+CYGCHECK_OUT="$WORK/cygcheck.txt"
+cygcheck "$OUT_EXE" | tee "$CYGCHECK_OUT"
 while IFS= read -r line; do
   candidate=$(echo "$line" | tr -d '\r' | xargs || true)
   case "$candidate" in
@@ -95,7 +112,7 @@ while IFS= read -r line; do
       fi
       ;;
   esac
-done < /tmp/cygcheck.txt
+done < "$CYGCHECK_OUT"
 
 echo "--- bundled DLLs ---"
 ls -lh "$DLL_DIR"
@@ -121,8 +138,12 @@ EOF
 # fetch-mosh-binaries.cjs unpacks the tarball into the local
 # resources/mosh/win32-x64/ directory.
 BUNDLE_TGZ="$OUT_DIR/mosh-client-win32-x64.tar.gz"
-( cd "$OUT_DIR" && tar -czf "$BUNDLE_TGZ" \
-  "mosh-client-win32-x64.exe" \
+BUNDLE_DIR="$WORK/win32-x64-bundle"
+mkdir -p "$BUNDLE_DIR"
+cp "$OUT_EXE" "$BUNDLE_DIR/mosh-client.exe"
+cp -R "$DLL_DIR" "$BUNDLE_DIR/mosh-client-win32-x64-dlls"
+( cd "$BUNDLE_DIR" && tar -czf "$BUNDLE_TGZ" \
+  "mosh-client.exe" \
   "mosh-client-win32-x64-dlls" )
 
 ( cd "$OUT_DIR" && sha256sum "mosh-client-win32-x64.exe" > "mosh-client-win32-x64.sha256" )

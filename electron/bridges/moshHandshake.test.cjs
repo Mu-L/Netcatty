@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   parseMoshConnect,
   buildSshHandshakeCommand,
+  buildMoshServerCommand,
   buildMoshClientCommand,
   createMoshConnectSniffer,
   buildMoshClientEnv,
@@ -36,7 +37,7 @@ test("parseMoshConnect rejects implausibly short keys (substring noise)", () => 
 });
 
 test("parseMoshConnect handles a Buffer chunk", () => {
-  const buf = Buffer.from("garbage MOSH CONNECT 60010 ABCDEFGHIJKLMNOPQRSTUV== more\n");
+  const buf = Buffer.from("garbage MOSH CONNECT 60010 ABCDEFGHIJKLMNOPQRSTUV==\n");
   const got = parseMoshConnect(buf);
   assert.equal(got && got.port, 60010);
 });
@@ -47,7 +48,7 @@ test("buildSshHandshakeCommand omits -t and uses default port", () => {
   assert.deepEqual(got.args, [
     "alice@example.com",
     "--",
-    "LC_ALL=en_US.UTF-8 mosh-server new -s",
+    "LC_ALL='en_US.UTF-8' mosh-server new -s",
   ]);
 });
 
@@ -62,7 +63,22 @@ test("buildSshHandshakeCommand interpolates lang and moshServer overrides", () =
     lang: "zh_CN.UTF-8",
     moshServer: "/opt/mosh/bin/mosh-server new -s -c 256",
   });
-  assert.equal(got.args.at(-1), "LC_ALL=zh_CN.UTF-8 /opt/mosh/bin/mosh-server new -s -c 256");
+  assert.equal(got.args.at(-1), "LC_ALL='zh_CN.UTF-8' /opt/mosh/bin/mosh-server new -s -c 256");
+});
+
+test("buildSshHandshakeCommand shell-quotes lang values", () => {
+  const got = buildSshHandshakeCommand({
+    host: "h",
+    lang: "C; touch /tmp/netcatty-owned",
+  });
+  assert.equal(got.args.at(-1), "LC_ALL='C; touch /tmp/netcatty-owned' mosh-server new -s");
+});
+
+test("buildMoshServerCommand treats custom server input as a path", () => {
+  assert.equal(
+    buildMoshServerCommand("/opt/Mosh Tools/mosh-server; touch /tmp/nope"),
+    "'/opt/Mosh Tools/mosh-server; touch /tmp/nope' new -s",
+  );
 });
 
 test("buildSshHandshakeCommand throws when host is missing", () => {
@@ -89,8 +105,55 @@ test("createMoshConnectSniffer detects MOSH CONNECT split across chunks", () => 
   const sniffer = createMoshConnectSniffer();
   const r1 = sniffer.feed("login as: alice\r\nlast login: yesterday\r\nMOSH CONNE");
   assert.equal(r1.parsed, null);
+  assert.ok(!String(r1.visible).includes("MOSH CONNE"));
   const r2 = sniffer.feed("CT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n");
   assert.deepEqual(r2.parsed, { port: 60002, key: "ABCDEFGHIJKLMNOPQRSTUV==" });
+  assert.ok(!String(r2.visible).includes("MOSH CONNECT"));
+  assert.ok(!String(r2.visible).includes("ABCDEFGHIJKLMNOPQRSTUV=="));
+});
+
+test("createMoshConnectSniffer does not leak a split MOSH key", () => {
+  const sniffer = createMoshConnectSniffer();
+  const r1 = sniffer.feed("intro\r\nMOSH CONNECT 60002 ABCDEFGHIJ");
+  assert.equal(r1.parsed, null);
+  assert.equal(String(r1.visible), "intro\r\n");
+  const r2 = sniffer.feed("KLMNOPQRSTUV==\r\n");
+  assert.deepEqual(r2.parsed, { port: 60002, key: "ABCDEFGHIJKLMNOPQRSTUV==" });
+  assert.equal(String(r2.visible), "");
+});
+
+test("createMoshConnectSniffer passes through prompts without waiting for a newline", () => {
+  const sniffer = createMoshConnectSniffer();
+  const r = sniffer.feed("password:");
+  assert.equal(r.parsed, null);
+  assert.equal(String(r.visible), "password:");
+});
+
+test("createMoshConnectSniffer ignores invalid MOSH CONNECT lines", () => {
+  for (const line of [
+    "MOSH CONNECT 99999 ABCDEFGHIJKLMNOPQRSTUV==\r\n",
+    "MOSH CONNECT 0 ABCDEFGHIJKLMNOPQRSTUV==\r\n",
+    "MOSH CONNECT 60000 short\r\n",
+    "MOSH CONNECT 60000 ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n",
+    "MOSH CONNECT 60000 ABCDEFGHIJKLMNOPQRSTUV==oops\r\n",
+  ]) {
+    const sniffer = createMoshConnectSniffer();
+    const r = sniffer.feed(line);
+    assert.equal(r.parsed, null, line);
+  }
+});
+
+test("createMoshConnectSniffer captures MOSH IP without showing protocol lines", () => {
+  const sniffer = createMoshConnectSniffer();
+  const r = sniffer.feed("welcome\r\nMOSH IP 203.0.113.8\r\nMOSH CONNECT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n");
+  assert.deepEqual(r.parsed, { port: 60002, key: "ABCDEFGHIJKLMNOPQRSTUV==", host: "203.0.113.8" });
+  assert.equal(String(r.visible), "welcome\r\n");
+});
+
+test("createMoshConnectSniffer ignores unsafe MOSH IP values", () => {
+  const sniffer = createMoshConnectSniffer();
+  const r = sniffer.feed("MOSH IP --help\r\nMOSH CONNECT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n");
+  assert.deepEqual(r.parsed, { port: 60002, key: "ABCDEFGHIJKLMNOPQRSTUV==" });
 });
 
 test("createMoshConnectSniffer strips the magic line from visible output", () => {

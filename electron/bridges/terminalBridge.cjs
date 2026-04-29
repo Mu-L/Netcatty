@@ -798,6 +798,7 @@ function resolveBareMoshClient(options) {
         return path.resolve(expanded);
       }
     }
+    return null;
   }
 
   const bundled = bundledMoshClient();
@@ -848,7 +849,7 @@ async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe
     port: options.port,
     username: options.username,
     lang,
-    moshServer: options.moshServerPath ? `${options.moshServerPath} new -s` : undefined,
+    moshServer: moshHandshake.buildMoshServerCommand(options.moshServerPath),
   });
 
   const sshEnv = { ...process.env, ...optionsEnv, TERM: "xterm-256color" };
@@ -924,6 +925,10 @@ async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe
   });
 
   sshPty.onExit(({ exitCode, signal }) => {
+    if (sessions.get(sessionId) !== session || session.closed) {
+      return;
+    }
+
     if (session.moshHandshakePhase === "parsed" && session.moshHandshakeResult) {
       try {
         swapToMoshClient(session, options, {
@@ -939,7 +944,7 @@ async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe
         flush();
         sessionLogStreamManager.stopStream(sessionId);
         const contents = electronModule.webContents.fromId(session.webContentsId);
-        contents?.send("netcatty:session-exit", {
+        contents?.send("netcatty:exit", {
           sessionId,
           reason: "error",
           error: `Failed to spawn mosh-client: ${err.message}`,
@@ -956,7 +961,7 @@ async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe
     flush();
     sessionLogStreamManager.stopStream(sessionId);
     const contents = electronModule.webContents.fromId(session.webContentsId);
-    contents?.send("netcatty:session-exit", {
+    contents?.send("netcatty:exit", {
       sessionId,
       exitCode,
       signal,
@@ -965,7 +970,7 @@ async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe
     sessions.delete(sessionId);
   });
 
-  return sessionId;
+  return { sessionId };
 }
 
 /**
@@ -988,7 +993,7 @@ function swapToMoshClient(session, options, ctx) {
 
   const { command, args: clientArgs } = moshHandshake.buildMoshClientCommand({
     moshClientPath: bareClient,
-    host: options.hostname,
+    host: parsed.host || options.hostname,
     port: parsed.port,
   });
 
@@ -1036,10 +1041,13 @@ function swapToMoshClient(session, options, ctx) {
   }
 
   mcPty.onExit(({ exitCode, signal }) => {
+    if (sessions.get(sessionId) !== session || session.closed) {
+      return;
+    }
     flush();
     sessionLogStreamManager.stopStream(sessionId);
     const contents = electronModule.webContents.fromId(session.webContentsId);
-    contents?.send("netcatty:session-exit", {
+    contents?.send("netcatty:exit", {
       sessionId,
       exitCode,
       signal,
@@ -1071,7 +1079,11 @@ async function startMoshSession(event, options) {
   const bareClient = resolveBareMoshClient(options);
   if (bareClient) {
     const sshExe = moshHandshake.resolveSshExecutable({
-      findExecutable,
+      findExecutable: (name) => (
+        process.platform === "win32"
+          ? findExecutable(name)
+          : resolvePosixExecutable(name)
+      ),
       fileExists: (p) => isExecutableFile(p) || fs.existsSync(p),
     });
     if (sshExe) {
@@ -1228,7 +1240,7 @@ async function startMoshSession(event, options) {
   // good build (see scripts/build-mosh/, .github/workflows/build-mosh-
   // binaries.yml) so distro skew on libssl / libprotobuf / libncurses
   // can't break a connection.
-  if (!env.MOSH_CLIENT) {
+  if (!explicitClient && !env.MOSH_CLIENT) {
     const bundled = bundledMoshClient();
     if (bundled) env.MOSH_CLIENT = bundled;
   }
@@ -1509,6 +1521,8 @@ function writeToSession(event, payload) {
 function resizeSession(event, payload) {
   const session = sessions.get(payload.sessionId);
   if (!session) return;
+  if (Number.isFinite(payload.cols)) session.cols = payload.cols;
+  if (Number.isFinite(payload.rows)) session.rows = payload.rows;
   
   try {
     if (session.stream) {
@@ -1540,6 +1554,7 @@ function resizeSession(event, payload) {
 function closeSession(event, payload) {
   const session = sessions.get(payload.sessionId);
   if (!session) return;
+  session.closed = true;
   
   try {
     session.zmodemSentry?.cancel();

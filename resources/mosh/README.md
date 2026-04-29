@@ -1,10 +1,10 @@
 # Bundled `mosh-client`
 
-This directory holds the static, network-protocol-only `mosh-client`
-binary bundled with the Netcatty installer. The wrapper logic that
-drives `ssh` + `mosh-server` bootstrap remains the system `mosh` Perl
-wrapper for now; the bundled `mosh-client` is wired in via
-`MOSH_CLIENT=<bundled path>` (see `electron/bridges/terminalBridge.cjs`).
+This directory holds the network-protocol-only `mosh-client` binary
+bundled with the Netcatty installer. Netcatty drives the `ssh` +
+`mosh-server` bootstrap itself and then launches this bundled client
+directly (see `electron/bridges/moshHandshake.cjs` and
+`electron/bridges/terminalBridge.cjs`).
 
 ## How binaries land here
 
@@ -29,10 +29,12 @@ wrapper for now; the bundled `mosh-client` is wired in via
 2. The release built by that workflow gets a tag like
    `mosh-bin-1.4.0-1`, with `SHA256SUMS` attached.
 
-3. During `npm run pack`, set `MOSH_BIN_RELEASE=mosh-bin-1.4.0-1`
-   (and run `npm run fetch:mosh`) to pull the binaries into
-   `resources/mosh/<platform-arch>/`. `electron-builder.config.cjs`
-   then copies the matching one into `Resources/mosh/mosh-client[.exe]`.
+3. Release packaging sets `MOSH_BIN_RELEASE=mosh-bin-1.4.0-1` and runs
+   `npm run fetch:mosh` to pull the binaries into
+   `resources/mosh/<platform-arch>/`. For local packaging, set
+   `MOSH_BIN_RELEASE` yourself before running the same fetch command.
+   `electron-builder.config.cjs` then copies the matching binary into
+   `Resources/mosh/mosh-client[.exe]`.
 
 The directory is otherwise empty (binaries are gitignored).
 

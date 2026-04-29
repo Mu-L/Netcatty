@@ -30,12 +30,20 @@ on:
     paths:
       - ".gitattributes"
       - ".github/workflows/build-mosh-binaries.yml"
+      - "electron-builder.config.cjs"
+      - "package.json"
       - "scripts/build-mosh/**"
+      - "scripts/fetch-mosh-binaries.cjs"
+      - "scripts/mosh-extra-resources.cjs"
   pull_request:
     paths:
       - ".gitattributes"
       - ".github/workflows/build-mosh-binaries.yml"
+      - "electron-builder.config.cjs"
+      - "package.json"
       - "scripts/build-mosh/**"
+      - "scripts/fetch-mosh-binaries.cjs"
+      - "scripts/mosh-extra-resources.cjs"
 
 # Cancel superseded branch / PR builds; tag builds use a unique group
 # so a follow-up commit doesn't kill the in-progress release.
@@ -153,7 +161,7 @@ jobs:
           $script = @'
           set -euo pipefail
           cd "__WORKSPACE__"
-          export MOSH_REF='${{ env.MOSH_REF }}'
+          export MOSH_REF="${MOSH_REF:?missing MOSH_REF}"
           export ARCH=x64
           export OUT_DIR="__WORKSPACE__/out"
           mkdir -p "$OUT_DIR"
@@ -210,19 +218,26 @@ jobs:
           set -euo pipefail
           mkdir -p release
           for d in artifacts/*/; do
-            cp -r "$d"/* release/
+            find "$d" -maxdepth 1 -type f -exec cp {} release/ \;
           done
-          (cd release && sha256sum * > SHA256SUMS)
+          (cd release && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs sha256sum > SHA256SUMS)
           ls -la release
           cat release/SHA256SUMS
       - name: Determine tag
         id: tag
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            tag="${GITHUB_REF_NAME}"
           else
-            echo "name=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+            tag="${RELEASE_TAG}"
           fi
+          if [[ ! "$tag" =~ ^mosh-bin-[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid mosh binary release tag: $tag" >&2
+            exit 1
+          fi
+          printf 'name=%s\n' "$tag" >> "$GITHUB_OUTPUT"
       - name: Create / update release
         uses: softprops/action-gh-release@v2
         with:

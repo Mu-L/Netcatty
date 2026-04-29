@@ -21,11 +21,24 @@ set -euo pipefail
 : "${ARCH:?missing ARCH}"
 : "${OUT_DIR:?missing OUT_DIR}"
 
+validate_mosh_ref() {
+  if [[ ! "$MOSH_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] \
+    || [[ "$MOSH_REF" == *..* ]] \
+    || [[ "$MOSH_REF" == *@\{* ]] \
+    || [[ "$MOSH_REF" == */ ]] \
+    || [[ "$MOSH_REF" == *.lock ]]; then
+    echo "ERROR: invalid MOSH_REF: $MOSH_REF" >&2
+    exit 1
+  fi
+}
+validate_mosh_ref
+
 OPENSSL_VER=3.0.13
 PROTOBUF_VER=21.12
 NCURSES_VER=6.4
 
 WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
 PREFIX="$WORK/prefix"
 mkdir -p "$PREFIX/lib" "$PREFIX/include" "$OUT_DIR"
 
@@ -55,8 +68,12 @@ curl -fsSL "https://invisible-island.net/archives/ncurses/ncurses-$NCURSES_VER.t
   make -j"$(nproc)"
   make install )
 
-# Mosh
-git clone --depth 1 --branch "$MOSH_REF" https://github.com/mobile-shell/mosh.git
+# Mosh. Fetch the requested ref explicitly so branch names, tags, and commit
+# SHAs all work from workflow_dispatch.
+git init mosh
+git -C mosh remote add origin https://github.com/mobile-shell/mosh.git
+git -C mosh fetch --depth 1 origin "$MOSH_REF"
+git -C mosh checkout --detach FETCH_HEAD
 ( cd mosh
   export PATH="$PREFIX/bin:$PATH"
   ./autogen.sh
@@ -80,9 +97,15 @@ ldd "$OUT_BIN" || true
 echo "--- size ---"
 ls -lh "$OUT_BIN"
 
-# Sanity check: must not link any non-system shared libraries.
-if ldd "$OUT_BIN" | grep -E "libssl|libcrypto|libprotobuf|libncurses|libstdc\+\+" ; then
-  echo "ERROR: mosh-client still links a non-system shared library; static linking failed." >&2
+# Sanity check: must not link any non-system shared libraries. Allow only
+# the glibc runtime family and the ELF loader.
+ldd "$OUT_BIN" > "$WORK/ldd.txt" || true
+awk '
+  /=>/ { print $1; next }
+  /^[[:space:]]*\/.*ld-linux/ { print $1; next }
+' "$WORK/ldd.txt" > "$WORK/deps.txt"
+if grep -Ev '^(linux-vdso\.so\.1|lib(c|m|pthread|rt|dl|resolv)\.so\.[0-9]+|/lib.*/ld-linux.*\.so\.[0-9]+|ld-linux.*\.so\.[0-9]+)$' "$WORK/deps.txt"; then
+  echo "ERROR: mosh-client links a non-system shared library; static linking failed." >&2
   exit 1
 fi
 
