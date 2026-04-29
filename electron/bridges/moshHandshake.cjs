@@ -6,8 +6,8 @@
  * "MOSH CONNECT <port> <key>" line from the SSH stream, then execs
  * `mosh-client` locally with that port/key. This module does the same
  * thing in JS so we no longer need a Perl interpreter on the user's
- * machine — and so we can drive a bundled, statically-linked
- * `mosh-client` even on Windows (which has no Perl wrapper).
+ * machine — and so we can drive a bundled `mosh-client` even on
+ * Windows (which has no Perl wrapper).
  *
  * Flow (driven by terminalBridge.startMoshSession):
  *   1. spawn `ssh -t [-p port] [user@]host -- mosh-server new -s ...`

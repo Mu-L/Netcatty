@@ -4,8 +4,8 @@
 # dependency). FluentTerminal is GPL-3.0 — same license as netcatty —
 # and the binary itself is GPL-3.0 from upstream mobile-shell/mosh.
 #
-# Phase-2 plan (follow-up): replace this fetch with an in-CI Cygwin static
-# build from upstream source so we own the provenance end-to-end.
+# Phase-2 replaced this fetch with an in-CI Cygwin build from upstream
+# source so we own the provenance end-to-end.
 #
 # The pinned commit is FluentTerminal master @ bad0f85 (2019-09-12), which
 # is the commit where the prebuilt mosh-client.exe was added to the repo.

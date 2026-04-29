@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a static, glibc-only mosh-client binary inside manylinux2014.
+# Build a portable mosh-client binary inside manylinux2014.
 #
 # Inputs (env):
 #   MOSH_REF  — git ref of mobile-shell/mosh to build (e.g. mosh-1.4.0)
@@ -11,10 +11,11 @@
 #   $OUT_DIR/mosh-client-linux-<arch>.sha256
 #
 # Strategy: build OpenSSL, protobuf, ncurses as static archives in a
-# scratch prefix, then build mosh against those, link libstdc++/libgcc
-# statically. The resulting binary depends only on the glibc runtime
-# (manylinux2014 = glibc 2.17 = compatible with virtually every distro
-# released since 2014, including Debian 9+, Ubuntu 18.04+, CentOS 7+).
+# scratch prefix, then build mosh against those and link libstdc++/libgcc
+# statically. The resulting binary still depends on standard Linux system
+# libraries such as glibc/libz/libutil from the manylinux2014 baseline
+# (compatible with virtually every distro released since 2014, including
+# Debian 9+, Ubuntu 18.04+, CentOS 7+).
 set -euo pipefail
 
 : "${MOSH_REF:?missing MOSH_REF}"

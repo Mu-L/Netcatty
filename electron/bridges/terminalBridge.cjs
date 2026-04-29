@@ -1235,11 +1235,11 @@ async function startMoshSession(event, options) {
     }
   }
 
-  // Prefer the bundled static mosh-client over whatever the system mosh
-  // wrapper would otherwise resolve via PATH. We've vendored a known-
-  // good build (see scripts/build-mosh/, .github/workflows/build-mosh-
-  // binaries.yml) so distro skew on libssl / libprotobuf / libncurses
-  // can't break a connection.
+  // Prefer the bundled mosh-client over whatever the system mosh wrapper
+  // would otherwise resolve via PATH. We've vendored a known-good build
+  // (see scripts/build-mosh/, .github/workflows/build-mosh-binaries.yml)
+  // so distro skew on libssl / libprotobuf / libncurses can't break a
+  // connection.
   if (!explicitClient && !env.MOSH_CLIENT) {
     const bundled = bundledMoshClient();
     if (bundled) env.MOSH_CLIENT = bundled;
@@ -1718,12 +1718,11 @@ function validatePath(event, payload) {
  * In dev / non-packaged runs the path is computed against the project
  * root so the helper is testable without packaging the app.
  *
- * Note this returns the *static, network-protocol* `mosh-client`, not
- * the `mosh` wrapper script. POSIX platforms still rely on a system
- * `mosh` Perl wrapper to orchestrate the SSH bootstrap; the bundled
- * binary is wired into that wrapper via `MOSH_CLIENT=<bundled>` so
- * users get a known-good static client instead of whatever the distro
- * happens to ship.
+ * Note this returns the network-protocol `mosh-client`, not the `mosh`
+ * wrapper script. POSIX platforms still rely on a system `mosh` Perl
+ * wrapper to orchestrate the SSH bootstrap; the bundled binary is wired
+ * into that wrapper via `MOSH_CLIENT=<bundled>` so users get a known-good
+ * client instead of whatever the distro happens to ship.
  */
 function bundledMoshClient(opts = {}) {
   const isWin = (opts.platform || process.platform) === "win32";

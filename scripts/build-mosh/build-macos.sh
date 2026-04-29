@@ -10,11 +10,10 @@
 #   $OUT_DIR/mosh-client-darwin-universal
 #   $OUT_DIR/mosh-client-darwin-universal.sha256
 #
-# Strategy: build OpenSSL/protobuf/ncurses as static archives separately
-# for arm64 and x86_64 (cross-compile via Apple clang's -arch flag), link
-# mosh-client per arch, then lipo the two single-arch binaries into one
-# universal binary. Result depends only on /usr/lib/libSystem.B.dylib and
-# the system C++ runtime (libc++.1.dylib).
+# Strategy: build OpenSSL/protobuf/ncurses for arm64 and x86_64
+# (cross-compile via Apple clang's -arch flag), link mosh-client per arch,
+# then lipo the two single-arch binaries into one universal binary. The
+# final binary is allowed to depend only on macOS system dylibs.
 set -euo pipefail
 
 : "${MOSH_REF:?missing MOSH_REF}"

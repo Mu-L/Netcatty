@@ -91,8 +91,9 @@ ls -lh "$OUT_EXE"
 echo "--- cygcheck ---"
 CYGCHECK_OUT="$WORK/cygcheck.txt"
 cygcheck "$OUT_EXE" | tee "$CYGCHECK_OUT"
+bundled_count=0
 while IFS= read -r line; do
-  candidate=$(echo "$line" | tr -d '\r' | xargs || true)
+  candidate=$(printf '%s' "$line" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
   case "$candidate" in
     /usr/bin/*.dll|*\\bin\\*.dll|*/bin/*.dll)
       # Convert Windows-style paths to Cygwin paths if present.
@@ -108,11 +109,17 @@ while IFS= read -r line; do
         if [ ! -f "$DLL_DIR/$base" ]; then
           cp "$cyg_candidate" "$DLL_DIR/$base"
           echo "bundled DLL: $base"
+          bundled_count=$((bundled_count + 1))
         fi
       fi
       ;;
   esac
 done < "$CYGCHECK_OUT"
+
+if [ "$bundled_count" -eq 0 ] || [ ! -f "$DLL_DIR/cygwin1.dll" ]; then
+  echo "ERROR: failed to bundle required Cygwin DLLs for mosh-client.exe." >&2
+  exit 1
+fi
 
 echo "--- bundled DLLs ---"
 ls -lh "$DLL_DIR"

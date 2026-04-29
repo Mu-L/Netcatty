@@ -57,8 +57,8 @@ env:
 jobs:
   # ------------------------------------------------------------------
   # Linux x64 (manylinux2014 / glibc 2.17, broad distro compatibility).
-  # Static-links OpenSSL, protobuf, ncurses; libstdc++ and libgcc.
-  # Resulting mosh-client only depends on the glibc runtime.
+  # Static-links the heavy third-party deps where possible; the resulting
+  # mosh-client still depends on baseline Linux system libraries.
   # ------------------------------------------------------------------
   build-linux-x64:
     name: build-linux-x64
