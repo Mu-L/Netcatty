@@ -19,6 +19,7 @@ const { detectShellKind } = require("./ai/ptyExec.cjs");
 const { trackSessionIdlePrompt } = require("./ai/shellUtils.cjs");
 const { createZmodemSentry } = require("./zmodemHelper.cjs");
 const { discoverShells } = require("./shellDiscovery.cjs");
+const moshHandshake = require("./moshHandshake.cjs");
 
 // Shared references
 let sessions = null;
@@ -779,9 +780,269 @@ async function startTelnetSession(event, options) {
 }
 
 /**
- * Start a Mosh session using system mosh-client
+ * Resolve a usable bare `mosh-client` binary (i.e. not the Perl
+ * wrapper) from, in order:
+ *   1. options.moshClientPath when its basename matches `mosh-client[.exe]`
+ *   2. resources/mosh/<…>/ via bundledMoshClient()
+ *   3. PATH lookup for `mosh-client`
+ *
+ * Returns the absolute path or null.
+ */
+function resolveBareMoshClient(options) {
+  const explicit = typeof options.moshClientPath === "string" ? options.moshClientPath.trim() : "";
+  if (explicit) {
+    const expanded = expandHomePath(explicit);
+    if (path.isAbsolute(expanded) && isExecutableFile(expanded)) {
+      const base = path.basename(expanded).toLowerCase();
+      if (base === "mosh-client" || base === "mosh-client.exe") {
+        return path.resolve(expanded);
+      }
+    }
+  }
+
+  const bundled = bundledMoshClient();
+  if (bundled) return bundled;
+
+  if (process.platform === "win32") {
+    const onPath = findExecutable("mosh-client");
+    if (onPath && onPath !== "mosh-client" && fs.existsSync(onPath)) return onPath;
+  } else {
+    const onPath = resolvePosixExecutable("mosh-client");
+    if (onPath) return onPath;
+  }
+  return null;
+}
+
+/**
+ * Run the SSH bootstrap that the Perl `mosh` wrapper would otherwise
+ * do: spawn `ssh [user@]host -- mosh-server new`, capture stdout, and
+ * resolve with the port + key parsed from the MOSH CONNECT line.
+ *
+ * Stdout / stderr are buffered (not streamed to the terminal) — the
+ * SSH bootstrap is internal protocol; only its exit / parse outcome
+ * matters to the user. On parse, ssh exits naturally because the
+ * remote `mosh-server new` forks and detaches. On auth failure ssh
+ * exits non-zero and we surface its stderr in the rejection so the
+ * renderer can print a useful message.
+ */
+function runMoshSshHandshake({ sshExe, host, port, username, lang, moshServer, sshArgs, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const { spawn } = require("node:child_process");
+    const { args } = moshHandshake.buildSshHandshakeCommand({ host, port, username, lang, moshServer, sshArgs });
+    const stdoutBuf = [];
+    const stderrBuf = [];
+
+    let settled = false;
+    const settle = (fn) => { if (settled) return; settled = true; fn(); };
+    const child = spawn(sshExe, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      // Inherit env so SSH can resolve the user's ssh-agent socket,
+      // SSH config (~/.ssh/config), and known_hosts.
+      env: process.env,
+    });
+
+    const timer = setTimeout(() => {
+      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+      settle(() => reject(new Error(
+        `SSH bootstrap for Mosh timed out after ${timeoutMs}ms. ` +
+        "Ensure `ssh ${user}@${host}` works non-interactively (key auth or agent).",
+      )));
+    }, timeoutMs || 30_000);
+
+    child.stdout.on("data", (chunk) => {
+      stdoutBuf.push(chunk);
+      const parsed = moshHandshake.parseMoshConnect(Buffer.concat(stdoutBuf));
+      if (parsed) {
+        clearTimeout(timer);
+        // Don't kill ssh — it'll exit cleanly after mosh-server forks.
+        settle(() => resolve({ port: parsed.port, key: parsed.key }));
+      }
+    });
+    child.stderr.on("data", (chunk) => stderrBuf.push(chunk));
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      settle(() => reject(new Error(`Failed to spawn ssh: ${err.message}`)));
+    });
+
+    child.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      // If we already resolved in the stdout handler, this is the
+      // benign post-fork exit and we don't need to do anything.
+      if (settled) return;
+      const stderr = Buffer.concat(stderrBuf).toString("utf8").trim();
+      const stdout = Buffer.concat(stdoutBuf).toString("utf8").trim();
+      const reason = signal ? `signal ${signal}` : `code ${code}`;
+      const detail = stderr || stdout || "(no output)";
+      settle(() => reject(new Error(
+        `SSH bootstrap for Mosh failed (${reason}). Output:\n${detail}`,
+      )));
+    });
+  });
+}
+
+/**
+ * Phase 2 path: run the SSH handshake ourselves and spawn a bare
+ * `mosh-client` directly, instead of delegating to the upstream Perl
+ * `mosh` wrapper. Lets Mosh work on Windows out of the box and lets
+ * macOS / Linux users use a bundled, statically-linked client.
+ *
+ * Caller has already validated that `bareClient` and `sshExe` exist.
+ */
+async function startMoshSessionViaHandshake(event, options, { bareClient, sshExe }) {
+  const sessionId = options.sessionId || randomUUID();
+  const cols = options.cols || 80;
+  const rows = options.rows || 24;
+  const optionsEnv = options.env || {};
+  const lang = (optionsEnv.LANG || resolveLangFromCharsetForMosh(options.charset));
+
+  // Run ssh + mosh-server. Errors here propagate to the renderer with
+  // the captured ssh stderr so the user can see "Permission denied",
+  // "Host key verification failed", etc.
+  const { port, key } = await runMoshSshHandshake({
+    sshExe,
+    host: options.hostname,
+    port: options.port,
+    username: options.username,
+    lang,
+    moshServer: options.moshServerPath ? `${options.moshServerPath} new -s` : undefined,
+    sshArgs: undefined,
+    timeoutMs: 30_000,
+  });
+
+  const env = moshHandshake.buildMoshClientEnv({
+    baseEnv: { ...process.env, ...optionsEnv, TERM: "xterm-256color" },
+    key,
+    lang,
+  });
+  if (options.agentForwarding && process.env.SSH_AUTH_SOCK) {
+    env.SSH_AUTH_SOCK = process.env.SSH_AUTH_SOCK;
+  }
+
+  const { command, args: clientArgs } = moshHandshake.buildMoshClientCommand({
+    moshClientPath: bareClient,
+    host: options.hostname,
+    port,
+  });
+
+  const proc = pty.spawn(command, clientArgs, {
+    cols,
+    rows,
+    env,
+    cwd: os.homedir(),
+    encoding: null,
+  });
+
+  const session = {
+    proc,
+    pty: proc,
+    type: "mosh",
+    protocol: "mosh",
+    webContentsId: event.sender.id,
+    hostname: options.hostname || "",
+    username: options.username || "",
+    label: options.label || options.hostname || "Mosh Session",
+    shellKind: "posix",
+    shellExecutable: "remote-shell",
+    flushPendingData: null,
+    lastIdlePrompt: "",
+    lastIdlePromptAt: 0,
+    _promptTrackTail: "",
+  };
+  sessions.set(sessionId, session);
+
+  if (options.sessionLog?.enabled && options.sessionLog?.directory) {
+    sessionLogStreamManager.startStream(sessionId, {
+      hostLabel: options.label || options.hostname,
+      hostname: options.hostname,
+      directory: options.sessionLog.directory,
+      format: options.sessionLog.format || "txt",
+      startTime: Date.now(),
+    });
+  }
+
+  const { bufferData, flush } = createPtyBuffer((data) => {
+    const contents = electronModule.webContents.fromId(session.webContentsId);
+    contents?.send("netcatty:data", { sessionId, data });
+  });
+  session.flushPendingData = flush;
+
+  if (process.platform !== "win32") {
+    const decoder = new StringDecoder("utf8");
+    const sentry = createZmodemSentry({
+      sessionId,
+      onData(buf) {
+        const str = decoder.write(buf);
+        if (!str) return;
+        trackSessionIdlePrompt(session, str);
+        bufferData(str);
+        sessionLogStreamManager.appendData(sessionId, str);
+      },
+      writeToRemote(buf) {
+        try { return proc.write(buf); } catch { return true; }
+      },
+      getWebContents() {
+        return electronModule.webContents.fromId(session.webContentsId);
+      },
+      protocolLabel: "Mosh",
+    });
+    session.zmodemSentry = sentry;
+    proc.onData((data) => sentry.consume(data));
+  } else {
+    proc.onData((data) => {
+      const str = data.toString("utf8");
+      trackSessionIdlePrompt(session, str);
+      bufferData(str);
+      sessionLogStreamManager.appendData(sessionId, str);
+    });
+  }
+
+  proc.onExit(({ exitCode, signal }) => {
+    flush();
+    sessionLogStreamManager.stopStream(sessionId);
+    const contents = electronModule.webContents.fromId(session.webContentsId);
+    if (exitCode !== 0) {
+      contents?.send("netcatty:session-exit", { sessionId, exitCode, signal, reason: "error" });
+    } else {
+      contents?.send("netcatty:session-exit", { sessionId, exitCode, signal, reason: "exited" });
+    }
+    sessions.delete(sessionId);
+  });
+
+  return sessionId;
+}
+
+function resolveLangFromCharsetForMosh(charset) {
+  if (!charset) return "en_US.UTF-8";
+  const trimmed = String(charset).trim();
+  if (/^utf-?8$/i.test(trimmed) || /^utf8$/i.test(trimmed)) return "en_US.UTF-8";
+  return trimmed;
+}
+
+/**
+ * Start a Mosh session.
+ *
+ * Phase 2 (preferred): when a bare `mosh-client` binary is available
+ * and `ssh` is on the system, drive the handshake in Node and spawn
+ * mosh-client directly — no Perl wrapper, works on Windows.
+ *
+ * Phase 1 fallback (legacy): delegate to the system `mosh` wrapper,
+ * preserved so users with custom mosh setups don't regress.
  */
 async function startMoshSession(event, options) {
+  // Phase 2 path — try first.
+  const bareClient = resolveBareMoshClient(options);
+  if (bareClient) {
+    const sshExe = moshHandshake.resolveSshExecutable({
+      findExecutable,
+      fileExists: (p) => isExecutableFile(p) || fs.existsSync(p),
+    });
+    if (sshExe) {
+      return startMoshSessionViaHandshake(event, options, { bareClient, sshExe });
+    }
+  }
+
+  // Phase 1 legacy: system `mosh` Perl wrapper.
   const sessionId = options.sessionId || randomUUID();
 
   const cols = options.cols || 80;
@@ -831,21 +1092,23 @@ async function startMoshSession(event, options) {
     // though the wrapper itself runs.
     resolvedMoshDir = path.dirname(moshCmd);
   } else if (process.platform === "win32") {
-    // Windows: there is no Perl-based mosh wrapper bundled in this
-    // release yet. We bundle the static `mosh-client.exe` (see
-    // resources/mosh/win32-x64/) but the wrapper rewrite that drives
-    // ssh + mosh-server bootstrap is tracked in a follow-up.
-    // Until then, prefer a system-installed mosh wrapper if present.
+    // Windows fallback when the Phase-2 handshake can't fire (no
+    // bundled mosh-client on disk and no `ssh` resolvable). Most
+    // packaged Windows installs *do* hit the Phase-2 path because
+    // OpenSSH ships in-box and mosh-client is bundled, so this branch
+    // is hit primarily by dev builds without bundled binaries.
     const winResolved = findExecutable("mosh");
     if (winResolved && winResolved !== "mosh" && fs.existsSync(winResolved)) {
       moshCmd = winResolved;
       resolvedMoshDir = path.dirname(winResolved);
     } else {
       throw new Error(
-        "Mosh on Windows is not yet supported out of the box. Install a `mosh` " +
-        "wrapper (e.g. via Cygwin or WSL) and ensure `mosh.exe` is on PATH, or " +
-        "point Settings → Terminal → Mosh at an absolute mosh wrapper path. " +
-        "A bundled wrapper is in development.",
+        "Mosh prerequisites not detected on Windows. The packaged build " +
+        "ships a bundled mosh-client and uses the in-box OpenSSH client; " +
+        "this dev build is missing one of them. Either install a `mosh` " +
+        "wrapper (Cygwin / WSL) on PATH, point Settings → Terminal → Mosh " +
+        "at an absolute mosh-client.exe / mosh wrapper path, or run a " +
+        "packaged build that includes resources/mosh/win32-x64/mosh-client.exe.",
       );
     }
   } else {
@@ -1556,6 +1819,7 @@ module.exports = {
   startMoshSession,
   detectMoshClient,
   bundledMoshClient,
+  resolveBareMoshClient,
   pickMoshClient,
   startSerialSession,
   listSerialPorts,

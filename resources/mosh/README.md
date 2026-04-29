@@ -57,10 +57,26 @@ docker run --rm -v $PWD:/workspace -w /workspace \
 For macOS the build needs an Xcode toolchain; see
 `scripts/build-mosh/build-macos.sh`.
 
+## Phase 2 — done in this PR
+
+- `electron/bridges/moshHandshake.cjs` reimplements the upstream Mosh
+  Perl wrapper in Node: spawn `ssh [user@]host -- mosh-server new`,
+  parse `MOSH CONNECT <port> <key>`, then spawn `mosh-client` locally
+  with `MOSH_KEY` in env. No Perl required.
+- `terminalBridge.startMoshSession` prefers this path whenever a bare
+  `mosh-client` (bundled or system) and `ssh` (in-box on Windows 10
+  1809+, system everywhere else) are both detectable. The legacy path
+  through the system `mosh` Perl wrapper is preserved as a fallback.
+- Auth is delegated to system `ssh` — keys, agent, ssh_config, and
+  known_hosts all keep working transparently. Password / 2FA prompts
+  require an interactive controlling TTY which the bootstrap does not
+  provide; users with those flows should keep using the legacy path
+  (system `mosh` wrapper) until a dedicated UI lands.
+
 ## Roadmap
 
-Phase 2 will replace the FluentTerminal-pinned Windows binary with an
-in-CI Cygwin static build from upstream source, plus a Node-side
-mosh-server bootstrap that removes the system `mosh` Perl wrapper
-dependency on every platform — making Mosh work out-of-the-box on
-Windows.
+- Replace the FluentTerminal-pinned Windows binary with an in-CI
+  Cygwin static build from upstream `mobile-shell/mosh` source so
+  Netcatty owns the provenance end-to-end.
+- Add password / 2FA prompt UI for the Phase-2 handshake so users
+  without key auth can drop the system `mosh` wrapper requirement.
