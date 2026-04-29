@@ -94,7 +94,8 @@ build_arch() {
       CC="clang" CXX="clang++" \
       CFLAGS="$CFLAGS_COMMON" CXXFLAGS="$CFLAGS_COMMON" LDFLAGS="$LDFLAGS_COMMON"
     make -j"$(sysctl -n hw.ncpu)"
-    make install )
+    make -C include install
+    make -C ncurses install )
 
   # mosh per-arch build
   ( cd mosh-src
