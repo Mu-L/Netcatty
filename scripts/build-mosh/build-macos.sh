@@ -26,7 +26,7 @@ OPENSSL_VER=3.0.13
 PROTOBUF_VER=21.12
 NCURSES_VER=6.4
 
-# Pre-installed on macos-13: autoconf, automake — install if missing.
+# Install build tools when they are not already present on the runner.
 brew list autoconf >/dev/null 2>&1 || brew install autoconf
 brew list automake >/dev/null 2>&1 || brew install automake
 brew list pkg-config >/dev/null 2>&1 || brew install pkg-config
@@ -106,8 +106,7 @@ build_arch() {
     cp src/frontend/mosh-client "$WORK/mosh-client-$ARCH" )
 }
 
-# Build host arch first (so protoc is available natively) — runner is arm64 on macos-13?
-# macos-13 runner is x86_64. macos-14 is arm64. Build x86_64 first when on x86_64 runner.
+# Build host arch first so the first protobuf pass can use a native protoc.
 NATIVE_ARCH=$(uname -m)
 if [ "$NATIVE_ARCH" = "arm64" ]; then
   build_arch arm64
