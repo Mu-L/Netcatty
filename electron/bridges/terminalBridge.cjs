@@ -831,7 +831,23 @@ async function startMoshSession(event, options) {
     // though the wrapper itself runs.
     resolvedMoshDir = path.dirname(moshCmd);
   } else if (process.platform === "win32") {
-    moshCmd = findExecutable("mosh") || "mosh.exe";
+    // Windows: there is no Perl-based mosh wrapper bundled in this
+    // release yet. We bundle the static `mosh-client.exe` (see
+    // resources/mosh/win32-x64/) but the wrapper rewrite that drives
+    // ssh + mosh-server bootstrap is tracked in a follow-up.
+    // Until then, prefer a system-installed mosh wrapper if present.
+    const winResolved = findExecutable("mosh");
+    if (winResolved && winResolved !== "mosh" && fs.existsSync(winResolved)) {
+      moshCmd = winResolved;
+      resolvedMoshDir = path.dirname(winResolved);
+    } else {
+      throw new Error(
+        "Mosh on Windows is not yet supported out of the box. Install a `mosh` " +
+        "wrapper (e.g. via Cygwin or WSL) and ensure `mosh.exe` is on PATH, or " +
+        "point Settings → Terminal → Mosh at an absolute mosh wrapper path. " +
+        "A bundled wrapper is in development.",
+      );
+    }
   } else {
     const resolved = resolvePosixExecutable("mosh", { pathOverride: mergedPathForResolution });
     if (!resolved) {
@@ -905,6 +921,16 @@ async function startMoshSession(event, options) {
         }
       }
     }
+  }
+
+  // Prefer the bundled static mosh-client over whatever the system mosh
+  // wrapper would otherwise resolve via PATH. We've vendored a known-
+  // good build (see scripts/build-mosh/, .github/workflows/build-mosh-
+  // binaries.yml) so distro skew on libssl / libprotobuf / libncurses
+  // can't break a connection.
+  if (!env.MOSH_CLIENT) {
+    const bundled = bundledMoshClient();
+    if (bundled) env.MOSH_CLIENT = bundled;
   }
 
   if (options.agentForwarding && process.env.SSH_AUTH_SOCK) {
@@ -1369,6 +1395,51 @@ function validatePath(event, payload) {
 }
 
 /**
+ * Locate the mosh-client binary bundled by electron-builder via
+ * `extraResources` (see electron-builder.config.cjs and
+ * .github/workflows/build-mosh-binaries.yml).
+ *
+ * Returns an absolute path when the binary is on disk, otherwise null.
+ * In dev / non-packaged runs the path is computed against the project
+ * root so the helper is testable without packaging the app.
+ *
+ * Note this returns the *static, network-protocol* `mosh-client`, not
+ * the `mosh` wrapper script. POSIX platforms still rely on a system
+ * `mosh` Perl wrapper to orchestrate the SSH bootstrap; the bundled
+ * binary is wired into that wrapper via `MOSH_CLIENT=<bundled>` so
+ * users get a known-good static client instead of whatever the distro
+ * happens to ship.
+ */
+function bundledMoshClient(opts = {}) {
+  const isWin = (opts.platform || process.platform) === "win32";
+  const basename = isWin ? "mosh-client.exe" : "mosh-client";
+
+  // Packaged: <Resources>/mosh/mosh-client[.exe]
+  const resourcesPath = opts.resourcesPath || process.resourcesPath;
+  if (resourcesPath) {
+    const packaged = path.join(resourcesPath, "mosh", basename);
+    if (fs.existsSync(packaged) && isExecutableFile(packaged)) return packaged;
+  }
+
+  // Dev fallback: resources/mosh/<platform-arch>/mosh-client[.exe] under
+  // the project root. Useful for `npm run start` after running
+  // `npm run fetch:mosh` locally.
+  const projectRoot = opts.projectRoot || path.resolve(__dirname, "..", "..");
+  const platform = opts.platform || process.platform;
+  const arch = opts.arch || process.arch;
+  const candidates = [];
+  if (platform === "darwin") {
+    candidates.push(path.join(projectRoot, "resources", "mosh", "darwin-universal", basename));
+  } else {
+    candidates.push(path.join(projectRoot, "resources", "mosh", `${platform}-${arch}`, basename));
+  }
+  for (const c of candidates) {
+    if (fs.existsSync(c) && isExecutableFile(c)) return c;
+  }
+  return null;
+}
+
+/**
  * Run the same auto-discovery startMoshSession uses, surfacing the result
  * (and the search list when nothing was found) to the Settings UI.
  */
@@ -1484,6 +1555,7 @@ module.exports = {
   startTelnetSession,
   startMoshSession,
   detectMoshClient,
+  bundledMoshClient,
   pickMoshClient,
   startSerialSession,
   listSerialPorts,
