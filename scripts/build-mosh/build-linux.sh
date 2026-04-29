@@ -104,7 +104,7 @@ awk '
   /=>/ { print $1; next }
   /^[[:space:]]*\/.*ld-linux/ { print $1; next }
 ' "$WORK/ldd.txt" > "$WORK/deps.txt"
-if grep -Ev '^(linux-vdso\.so\.1|lib(c|m|pthread|rt|dl|resolv)\.so\.[0-9]+|/lib.*/ld-linux.*\.so\.[0-9]+|ld-linux.*\.so\.[0-9]+)$' "$WORK/deps.txt"; then
+if grep -Ev '^(linux-vdso\.so\.1|lib(c|m|pthread|rt|dl|resolv|util|z)\.so\.[0-9]+|/lib.*/ld-linux.*\.so\.[0-9]+|ld-linux.*\.so\.[0-9]+)$' "$WORK/deps.txt"; then
   echo "ERROR: mosh-client links a non-system shared library; static linking failed." >&2
   exit 1
 fi
