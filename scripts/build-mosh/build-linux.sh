@@ -50,7 +50,8 @@ curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v$PROT
 # ncurses static
 curl -fsSL "https://invisible-island.net/archives/ncurses/ncurses-$NCURSES_VER.tar.gz" | tar xz
 ( cd "ncurses-$NCURSES_VER"
-  ./configure --prefix="$PREFIX" --without-shared --without-debug --without-cxx-shared --without-tests --disable-pc-files --with-termlib --enable-widec
+  CFLAGS="-fPIC -O2" CXXFLAGS="-fPIC -O2" \
+  ./configure --prefix="$PREFIX" --without-shared --without-debug --without-cxx-shared --without-tests --disable-pc-files --enable-widec
   make -j"$(nproc)"
   make install )
 
@@ -61,9 +62,11 @@ git clone --depth 1 --branch "$MOSH_REF" https://github.com/mobile-shell/mosh.gi
   ./autogen.sh
   PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/lib64/pkgconfig" \
   ./configure --enable-completion=no --disable-server \
+    CPPFLAGS="-I$PREFIX/include -I$PREFIX/include/ncursesw" \
     CXXFLAGS="-I$PREFIX/include -I$PREFIX/include/ncursesw -O2" \
     CFLAGS="-I$PREFIX/include -I$PREFIX/include/ncursesw -O2" \
-    LDFLAGS="-L$PREFIX/lib -L$PREFIX/lib64 -static-libstdc++ -static-libgcc"
+    LDFLAGS="-L$PREFIX/lib -L$PREFIX/lib64 -static-libstdc++ -static-libgcc" \
+    LIBS="-ldl -lpthread"
   make -j"$(nproc)" )
 
 OUT_BIN="$OUT_DIR/mosh-client-linux-$ARCH"
